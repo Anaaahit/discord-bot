@@ -59,6 +59,13 @@ const gifts = {
   pickles: 'Emergency Pickles',
   diapers: 'Diamond Diapers',
 };
+const babyPets = [
+  'a duckling in tiny boots',
+  'a dragon that sneezes confetti',
+  'a hamster with a briefcase',
+  'a sleepy capybara',
+  'a goose with an attitude',
+];
 const randomItem = items => items[Math.floor(Math.random() * items.length)];
 const activeRound = parent => Object.entries(rounds).find(([, round]) =>
   round.parent === parent && !['invite'].includes(round.stage));
@@ -150,6 +157,12 @@ async function command(interaction) {
       ])],
       allowedMentions: ping(member.id),
     });
+  }
+  if (name === 'babypet') {
+    if (round.pet) return privateReply(interaction, 'Your baby already has ' + round.pet + '.');
+    const pet = randomItem(babyPets);
+    return saveAndReply(id, round, { ...round, pet }, interaction,
+      { content: mention(round.parent) + '’s baby adopted ' + pet + '!', allowedMentions: silent });
   }
 
 }
@@ -395,6 +408,7 @@ client.once(Events.ClientReady, async ready => {
           name: 'godparent', description: 'Invite someone to be the baby’s godparent',
           options: [{ type: 6, name: 'member', description: 'Who to invite', required: true }],
         },
+        { name: 'babypet', description: 'Give your baby a surprise imaginary pet' },
       ],
     });
     console.log('Ready as ' + ready.user.tag + '. Try /impregnant in your server.');
