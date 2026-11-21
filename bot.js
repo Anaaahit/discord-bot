@@ -63,6 +63,16 @@ const randomItem = items => items[Math.floor(Math.random() * items.length)];
 const activeRound = parent => Object.entries(rounds).find(([, round]) =>
   round.parent === parent && !['invite'].includes(round.stage));
 
+async function saveAndReply(id, previous, updated, interaction, response) {
+  save(id, updated);
+  try {
+    return await interaction.reply(response);
+  } catch (error) {
+    if (rounds[id] === updated) save(id, previous);
+    throw error;
+  }
+}
+
 function closestGuess(round) {
   const guesses = Object.entries(round.guesses ?? {});
   guesses.sort(([, a], [, b]) =>
@@ -120,6 +130,26 @@ async function command(interaction) {
     const grams = interaction.options.getInteger('grams', true);
     save(id, { ...round, guesses: { ...round.guesses, [interaction.user.id]: { grams, at: Date.now() } } });
     return privateReply(interaction, 'Your guess of ' + grams + ' g is saved. You can change it before the timer ends.');
+  }
+  if (name === 'godparent') {
+    const member = interaction.options.getUser('member', true);
+    if (member.bot || member.id === round.parent || member.id === round.child) {
+      return privateReply(interaction, 'Pick another server member.');
+    }
+    if (round.godparent) return privateReply(interaction, mention(round.godparent) + ' is already this baby’s godparent.');
+    if (round.godparentInvite?.expiresAt > Date.now()) {
+      return privateReply(interaction, 'A godparent invitation is already waiting for a reply.');
+    }
+    const invitation = { user: member.id, token: randomUUID().slice(0, 8), expiresAt: Date.now() + inviteDelay };
+    return saveAndReply(id, round, { ...round, godparentInvite: invitation }, interaction, {
+      content: mention(member.id) + ', ' + mention(round.parent) + ' invites you to be the baby’s godparent! Reply ' +
+        relative(invitation.expiresAt) + '.',
+      components: [buttons(id, [
+        ['godparent_yes_' + invitation.token, 'Accept', ButtonStyle.Success],
+        ['godparent_no_' + invitation.token, 'Decline', ButtonStyle.Secondary],
+      ])],
+      allowedMentions: ping(member.id),
+    });
   }
 
 }
@@ -212,6 +242,25 @@ async function handle(interaction) {
       content: mention(round.parent) + '’s baby shower is open! Pick a ridiculous gift. Gifts received: ' + Object.keys(given).length +
         '. Latest gift: ' + given[interaction.user.id] + ' from ' + mention(interaction.user.id) + '.',
       allowedMentions: silent,
+    });
+  }
+  if (action.startsWith('godparent_')) {
+    const invitation = round.godparentInvite;
+    if (!invitation || !['godparent_yes_' + invitation.token, 'godparent_no_' + invitation.token].includes(action)) {
+      return privateReply(interaction, 'This godparent invitation is no longer active.');
+    }
+    if (interaction.user.id !== invitation.user) {
+      return privateReply(interaction, 'This invitation is for ' + mention(invitation.user) + '.');
+    }
+    if (Date.now() >= invitation.expiresAt) {
+      save(id, { ...round, godparentInvite: null });
+      return interaction.update({ content: 'The godparent invitation expired.', components: [], allowedMentions: silent });
+    }
+    const accepted = action.startsWith('godparent_yes_');
+    save(id, { ...round, godparentInvite: null, godparent: accepted ? invitation.user : round.godparent });
+    return interaction.update({
+      content: accepted ? mention(invitation.user) + ' accepted the godparent invitation!' : 'The godparent invitation was declined.',
+      components: [], allowedMentions: silent,
     });
   }
   const player = round.stage === 'child' && action !== 'stop' ? round.child : round.parent;
@@ -341,6 +390,10 @@ client.once(Events.ClientReady, async ready => {
             { type: 6, name: 'member', description: 'Which parent’s baby', required: true },
             { type: 4, name: 'grams', description: 'Your guess in grams', required: true, min_value: 1500, max_value: 6000 },
           ],
+        },
+        {
+          name: 'godparent', description: 'Invite someone to be the baby’s godparent',
+          options: [{ type: 6, name: 'member', description: 'Who to invite', required: true }],
         },
       ],
     });

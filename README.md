@@ -47,6 +47,7 @@ Run this in one Discord server. Use a channel where everyone who wants to play c
 | `/remind` | The parent sees how long remains until the reveal or baby. The bot also posts scheduled reminders. |
 | `/ultrasound` | The parent gets a random, silly ultrasound finding. |
 | `/guessbirth member:@someone grams:3200` | Anyone in the server guesses that baby's birth weight after the gender choice. They can change their guess until the 24-hour timer ends. The bot announces the actual game weight and closest guess when the timer ends. |
+| `/godparent member:@someone` | The parent invites a member to be the baby's godparent. That person accepts or declines within 10 minutes. |
 
 The parent can use their commands after accepting an invitation. Each parent can open one baby shower per round. Birth weight is a randomly generated game result.
 
