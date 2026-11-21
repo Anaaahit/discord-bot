@@ -181,7 +181,19 @@ async function command(interaction) {
     return saveAndReply(id, round, { ...round, lastKickAt: now }, interaction,
       { content: mention(round.parent) + ': ' + randomItem(kickMessages), allowedMentions: silent });
   }
-
+  if (name === 'panic') {
+    if (round.stage === 'child' || (round.stage === 'birth' && Date.now() >= round.due)) {
+      return privateReply(interaction, 'The baby has already arrived.');
+    }
+    if (round.panic?.endsAt > Date.now()) return privateReply(interaction, 'There is already a panic in progress.');
+    const panic = { token: randomUUID().slice(0, 8), endsAt: Date.now() + 60000, helpers: [] };
+    return saveAndReply(id, round, { ...round, panic }, interaction, {
+      content: mention(round.parent) + ' is panicking over a missing baby sock! Two people must press **Stay calm** ' +
+        'before ' + relative(panic.endsAt) + '. Helpers: 0/2.',
+      components: [buttons(id, [['calm_' + panic.token, 'Stay calm', ButtonStyle.Primary]])],
+      allowedMentions: silent,
+    });
+  }
 }
 
 function buttons(id, options) {
@@ -291,6 +303,24 @@ async function handle(interaction) {
     return interaction.update({
       content: accepted ? mention(invitation.user) + ' accepted the godparent invitation!' : 'The godparent invitation was declined.',
       components: [], allowedMentions: silent,
+    });
+  }
+  if (action.startsWith('calm_')) {
+    const panic = round.panic;
+    if (!panic || action !== 'calm_' + panic.token) return privateReply(interaction, 'This panic has ended.');
+    if (Date.now() >= panic.endsAt) {
+      save(id, { ...round, panic: null });
+      return interaction.update({ content: 'The baby sock was under the couch the whole time. Panic over.', components: [] });
+    }
+    if (panic.helpers.includes(interaction.user.id)) return privateReply(interaction, 'You already helped calm everyone down.');
+    const helpers = [...panic.helpers, interaction.user.id];
+    const resolved = helpers.length >= 2;
+    save(id, { ...round, panic: resolved ? null : { ...panic, helpers } });
+    return interaction.update({
+      content: resolved ? 'Two helpers found the baby sock! The panic is over. 🧦' :
+        mention(round.parent) + ' is panicking over a missing baby sock! Two people must press **Stay calm** before ' +
+        relative(panic.endsAt) + '. Helpers: ' + helpers.length + '/2.',
+      ...(resolved ? { components: [] } : {}), allowedMentions: silent,
     });
   }
   const player = round.stage === 'child' && action !== 'stop' ? round.child : round.parent;
@@ -427,6 +457,7 @@ client.once(Events.ClientReady, async ready => {
         },
         { name: 'babypet', description: 'Give your baby a surprise imaginary pet' },
         { name: 'kick', description: 'Announce a dramatic baby kick' },
+        { name: 'panic', description: 'Ask the server to help with a missing baby sock' },
       ],
     });
     console.log('Ready as ' + ready.user.tag + '. Try /impregnant in your server.');

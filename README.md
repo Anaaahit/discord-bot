@@ -50,6 +50,7 @@ Run this in one Discord server. Use a channel where everyone who wants to play c
 | `/godparent member:@someone` | The parent invites a member to be the baby's godparent. That person accepts or declines within 10 minutes. |
 | `/babypet` | The parent gets one random imaginary pet for the baby. |
 | `/kick` | The parent announces a random funny kick, with a 10-minute rest between kicks. |
+| `/panic` | The parent starts a 60-second baby-sock panic. Two different members must press **Stay calm** to win. |
 
 The parent can use their commands after accepting an invitation. Each parent can open one baby shower per round. Birth weight is a randomly generated game result.
 
