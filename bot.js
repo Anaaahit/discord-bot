@@ -66,6 +66,12 @@ const babyPets = [
   'a sleepy capybara',
   'a goose with an attitude',
 ];
+const kickMessages = [
+  'The baby just kicked the Wi-Fi router.',
+  'The baby is practicing karate in there.',
+  'The baby kicked exactly when someone said “bedtime.”',
+  'The baby wants everyone to know they are awake.',
+];
 const randomItem = items => items[Math.floor(Math.random() * items.length)];
 const activeRound = parent => Object.entries(rounds).find(([, round]) =>
   round.parent === parent && !['invite'].includes(round.stage));
@@ -163,6 +169,17 @@ async function command(interaction) {
     const pet = randomItem(babyPets);
     return saveAndReply(id, round, { ...round, pet }, interaction,
       { content: mention(round.parent) + '’s baby adopted ' + pet + '!', allowedMentions: silent });
+  }
+  if (name === 'kick') {
+    const now = Date.now();
+    if (round.stage === 'child' || (round.stage === 'birth' && now >= round.due)) {
+      return privateReply(interaction, 'The baby has already arrived.');
+    }
+    if (now - (round.lastKickAt ?? 0) < inviteDelay) {
+      return privateReply(interaction, 'The baby is resting. Try another kick ' + relative(round.lastKickAt + inviteDelay) + '.');
+    }
+    return saveAndReply(id, round, { ...round, lastKickAt: now }, interaction,
+      { content: mention(round.parent) + ': ' + randomItem(kickMessages), allowedMentions: silent });
   }
 
 }
@@ -409,6 +426,7 @@ client.once(Events.ClientReady, async ready => {
           options: [{ type: 6, name: 'member', description: 'Who to invite', required: true }],
         },
         { name: 'babypet', description: 'Give your baby a surprise imaginary pet' },
+        { name: 'kick', description: 'Announce a dramatic baby kick' },
       ],
     });
     console.log('Ready as ' + ready.user.tag + '. Try /impregnant in your server.');

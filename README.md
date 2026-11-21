@@ -49,6 +49,7 @@ Run this in one Discord server. Use a channel where everyone who wants to play c
 | `/guessbirth member:@someone grams:3200` | Anyone in the server guesses that baby's birth weight after the gender choice. They can change their guess until the 24-hour timer ends. The bot announces the actual game weight and closest guess when the timer ends. |
 | `/godparent member:@someone` | The parent invites a member to be the baby's godparent. That person accepts or declines within 10 minutes. |
 | `/babypet` | The parent gets one random imaginary pet for the baby. |
+| `/kick` | The parent announces a random funny kick, with a 10-minute rest between kicks. |
 
 The parent can use their commands after accepting an invitation. Each parent can open one baby shower per round. Birth weight is a randomly generated game result.
 
