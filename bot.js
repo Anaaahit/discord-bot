@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import {
-  ActionRowBuilder, ActivityType, ButtonBuilder, ButtonStyle, Client, Events,
-  GatewayIntentBits, MessageFlags, Routes, UserSelectMenuBuilder,
+  ActionRowBuilder, ActivityType, ApplicationIntegrationType, ButtonBuilder, ButtonStyle, Client, Events,
+  GatewayIntentBits, InteractionContextType, MessageFlags, OAuth2Scopes, PermissionFlagsBits, Routes,
+  UserSelectMenuBuilder,
 } from 'discord.js';
+import { activeRound, inviteBlocked } from './game-state.js';
 
 function minutes(name, fallback) {
   const value = Number(process.env[name] ?? fallback);
@@ -17,8 +19,8 @@ const revealDelay = minutes('REVEAL_MINUTES', 240);
 const birthDelay = minutes('BIRTH_MINUTES', 1440);
 const inviteDelay = 10 * 60000;
 const { DISCORD_TOKEN: token, DISCORD_SERVER_ID: serverId } = process.env;
-if (!token || !/^\d{17,20}$/.test(serverId ?? '')) {
-  throw new Error('Set DISCORD_TOKEN and DISCORD_SERVER_ID in .env.');
+if (!token || (serverId && !/^\d{17,20}$/.test(serverId))) {
+  throw new Error('Set DISCORD_TOKEN in .env. DISCORD_SERVER_ID, if present, must be a valid server ID.');
 }
 
 const file = new URL('./rounds.json', import.meta.url);
@@ -37,6 +39,13 @@ function save(id, record) {
   writeFileSync(temp, JSON.stringify(updated, null, 2), { mode: 0o600 });
   renameSync(temp, file);
   rounds = updated;
+}
+
+// Existing single-server rounds predate the guild field. Keep them in their original server.
+if (serverId) {
+  for (const [id, round] of Object.entries(rounds)) {
+    if (!round.guild) save(id, { ...round, guild: serverId });
+  }
 }
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
@@ -73,8 +82,6 @@ const kickMessages = [
   'The baby wants everyone to know they are awake.',
 ];
 const randomItem = items => items[Math.floor(Math.random() * items.length)];
-const activeRound = parent => Object.entries(rounds).find(([, round]) =>
-  round.parent === parent && !['invite'].includes(round.stage));
 
 async function saveAndReply(id, previous, updated, interaction, response) {
   save(id, updated);
@@ -99,7 +106,7 @@ async function command(interaction) {
   const name = interaction.commandName;
   if (name === 'impregnant') return invite(interaction);
   const target = name === 'guessbirth' ? interaction.options.getUser('member', true).id : interaction.user.id;
-  const entry = activeRound(target);
+  const entry = activeRound(rounds, interaction.guildId, target);
   if (!entry) return privateReply(interaction, 'That member has no active pregnancy game.');
   const [id, round] = entry;
 
@@ -248,15 +255,13 @@ async function invite(interaction) {
   if (member.bot || member.id === interaction.user.id) {
     return privateReply(interaction, 'Pick another server member.');
   }
-  const active = Object.values(rounds).filter(round => round.stage !== 'invite' || round.due > now);
-  if (active.some(round => round.parent === member.id ||
-    (round.stage === 'invite' && round.starter === interaction.user.id))) {
+  if (inviteBlocked(rounds, interaction.guildId, member.id, interaction.user.id, now)) {
     return privateReply(interaction, 'That member already has a round or you have an invite pending.');
   }
   const id = randomUUID();
   const round = {
     stage: 'invite', starter: interaction.user.id, parent: member.id,
-    channel: interaction.channelId, due: now + inviteDelay,
+    guild: interaction.guildId, channel: interaction.channelId, due: now + inviteDelay,
   };
   save(id, round);
   try {
@@ -268,7 +273,7 @@ async function invite(interaction) {
 }
 
 async function handle(interaction) {
-  if (interaction.guildId !== serverId) return;
+  if (!interaction.guildId) return;
   if (interaction.isChatInputCommand()) return command(interaction);
   if ((!interaction.isButton() && !interaction.isUserSelectMenu()) ||
       !interaction.customId.startsWith('baby:')) return;
@@ -276,6 +281,7 @@ async function handle(interaction) {
   const [, id, action] = interaction.customId.split(':');
   const round = rounds[id];
   if (!round) return privateReply(interaction, 'This round has ended.');
+  if (round.guild !== interaction.guildId) return privateReply(interaction, 'This round belongs to another server.');
   if (action.startsWith('gift_') && round.shower && gifts[action.slice(5)]) {
     if (round.gifts?.[interaction.user.id]) return privateReply(interaction, 'You already brought a gift.');
     const given = { ...round.gifts, [interaction.user.id]: gifts[action.slice(5)] };
@@ -380,13 +386,15 @@ async function handle(interaction) {
 }
 
 let checking = false;
+const reminderRetryAt = new Map();
 async function reminders() {
   if (checking) return;
   checking = true;
   try {
     for (const [id, savedRound] of Object.entries(rounds)) {
       let round = savedRound;
-      if (rounds[id] !== round || round.due === null || Date.now() < round.due) continue;
+      if (rounds[id] !== round || round.due === null || Date.now() < round.due ||
+          Date.now() < (reminderRetryAt.get(id) ?? 0)) continue;
       if (round.stage === 'invite') {
         save(id);
         continue;
@@ -398,7 +406,11 @@ async function reminders() {
       }
       try {
         const channel = await client.channels.fetch(round.channel);
-        if (rounds[id] !== round || !channel?.isSendable()) continue;
+        if (rounds[id] !== round) continue;
+        if (!channel?.isSendable() || channel.guildId !== round.guild) {
+          reminderRetryAt.set(id, Date.now() + 60000);
+          continue;
+        }
         const expired = round.stage === 'child';
         const current = expired ? { ...round, stage: 'birth', child: null } : round;
         const content = round.stage === 'reveal' ? 'Your gender reveal is ready!' :
@@ -409,9 +421,13 @@ async function reminders() {
           ...response, content: mention(round.parent) + ', ' + content,
           allowedMentions: ping(round.parent),
         });
-        if (rounds[id] === round) save(id, { ...current, reminded: true });
+        if (rounds[id] === round) {
+          save(id, { ...current, reminded: true });
+          reminderRetryAt.delete(id);
+        }
         else await sent.delete();
       } catch (error) {
+        reminderRetryAt.set(id, Date.now() + 60000);
         console.error('Could not deliver reminder:', error.message);
       }
     }
@@ -432,7 +448,7 @@ client.on(Events.InteractionCreate, interaction => {
 client.once(Events.ClientReady, async ready => {
   try {
     ready.user.setActivity('so excited for pregnancies!!', { type: ActivityType.Custom });
-    await ready.rest.put(Routes.applicationGuildCommands(ready.application.id, serverId), {
+    await ready.rest.put(Routes.applicationCommands(ready.application.id), {
       body: [
         {
           name: 'impregnant', description: 'Invite a member to play the baby game',
@@ -459,8 +475,23 @@ client.once(Events.ClientReady, async ready => {
         { name: 'babypet', description: 'Give your baby a surprise imaginary pet' },
         { name: 'kick', description: 'Announce a dramatic baby kick' },
         { name: 'panic', description: 'Ask the server to help with a missing baby sock' },
-      ],
+      ].map(command => ({
+        ...command,
+        integration_types: [ApplicationIntegrationType.GuildInstall],
+        contexts: [InteractionContextType.Guild],
+      })),
     });
+    if (serverId) {
+      try {
+        await ready.rest.put(Routes.applicationGuildCommands(ready.application.id, serverId), { body: [] });
+      } catch (error) {
+        console.warn('Could not remove old server-only commands:', error.message);
+      }
+    }
+    console.log('Invite link: ' + ready.generateInvite({
+      scopes: [OAuth2Scopes.Bot, OAuth2Scopes.ApplicationsCommands],
+      permissions: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages],
+    }));
     console.log('Ready as ' + ready.user.tag + '. Try /impregnant in your server.');
     setInterval(() => void reminders().catch(console.error), 5000);
     await reminders();
