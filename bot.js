@@ -5,7 +5,7 @@ import {
   GatewayIntentBits, InteractionContextType, MessageFlags, OAuth2Scopes, PermissionFlagsBits, Routes,
   UserSelectMenuBuilder,
 } from 'discord.js';
-import { activeRound, inviteBlocked } from './game-state.js';
+import { activeRound, canUseRound, inviteBlocked, scopeFor } from './game-state.js';
 
 function minutes(name, fallback) {
   const value = Number(process.env[name] ?? fallback);
@@ -105,12 +105,24 @@ function closestGuess(round) {
 async function command(interaction) {
   const name = interaction.commandName;
   if (name === 'impregnant') return invite(interaction);
-  const target = name === 'guessbirth' ? interaction.options.getUser('member', true).id : interaction.user.id;
-  const entry = activeRound(rounds, interaction.guildId, target);
+  const target = name === 'guessbirth' ? (interaction.options.getUser('member')?.id ?? interaction.user.id) : interaction.user.id;
+  const entry = activeRound(rounds, scopeFor(interaction), target);
   if (!entry) return privateReply(interaction, 'That member has no active pregnancy game.');
   const [id, round] = entry;
 
   if (name === 'remind') {
+    if (round.context === InteractionContextType.PrivateChannel &&
+        interaction.context === InteractionContextType.PrivateChannel) {
+      if (round.stage === 'child' && Date.now() >= round.due) {
+        const reopened = { ...round, stage: 'birth', child: null, reminded: true };
+        save(id, reopened);
+        return interaction.reply({ ...card(id, reopened), allowedMentions: silent });
+      }
+      if (round.stage === 'party' ||
+          (round.stage === 'birth' || round.stage === 'reveal') && Date.now() >= round.due) {
+        return interaction.reply({ ...card(id, round), allowedMentions: silent });
+      }
+    }
     const timing = round.stage === 'reveal'
       ? 'Gender reveal ' + relative(round.due) + '. Estimated birth ' + relative(round.due + birthDelay) + ' if you reveal on time.'
       : round.stage === 'party' ? 'Choose the gender to start the 24-hour birth timer.'
@@ -152,9 +164,12 @@ async function command(interaction) {
     return privateReply(interaction, 'Your guess of ' + grams + ' g is saved. You can change it before the timer ends.');
   }
   if (name === 'godparent') {
+    if (round.context === InteractionContextType.BotDM) {
+      return privateReply(interaction, 'Invite a godparent from a server or a chat with friends.');
+    }
     const member = interaction.options.getUser('member', true);
     if (member.bot || member.id === round.parent || member.id === round.child) {
-      return privateReply(interaction, 'Pick another server member.');
+      return privateReply(interaction, 'Pick another person in this chat.');
     }
     if (round.godparent) return privateReply(interaction, mention(round.godparent) + ' is already this baby’s godparent.');
     if (round.godparentInvite?.expiresAt > Date.now()) {
@@ -189,6 +204,9 @@ async function command(interaction) {
       { content: mention(round.parent) + ': ' + randomItem(kickMessages), allowedMentions: silent });
   }
   if (name === 'panic') {
+    if (round.context === InteractionContextType.BotDM) {
+      return privateReply(interaction, 'The baby-sock panic needs friends in a server or shared chat.');
+    }
     if (round.stage === 'child' || (round.stage === 'birth' && Date.now() >= round.due)) {
       return privateReply(interaction, 'The baby has already arrived.');
     }
@@ -233,9 +251,12 @@ function card(id, round) {
       const waiting = Date.now() < round.due;
       return {
         content: parent + ' revealed the baby is a ' + round.result + '! ' +
-          (waiting ? 'The baby is due ' + relative(round.due) + '. Birth choices unlock then.' : 'The baby has arrived! Pick an outcome.'),
+          (waiting ? 'The baby is due ' + relative(round.due) + '. Birth choices unlock then.' :
+            round.context === InteractionContextType.BotDM ?
+              'The baby has arrived! Play in a server or shared DM to choose a member as your kid.' :
+              'The baby has arrived! Pick an outcome.'),
         components: [buttons(id, [
-          ['choose', 'Choose a member', ButtonStyle.Primary, waiting],
+          ['choose', 'Choose a member', ButtonStyle.Primary, waiting || round.context === InteractionContextType.BotDM],
           ['loss', 'Miscarriage', ButtonStyle.Secondary, waiting],
           stop,
         ])],
@@ -250,22 +271,30 @@ function card(id, round) {
 }
 
 async function invite(interaction) {
-  const member = interaction.options.getUser('member', true);
+  const member = interaction.options.getUser('member');
+  const solo = interaction.context === InteractionContextType.BotDM;
   const now = Date.now();
-  if (member.bot || member.id === interaction.user.id) {
-    return privateReply(interaction, 'Pick another server member.');
+  if (!member && !solo) return privateReply(interaction, 'Choose someone in this chat to invite.');
+  if (solo && member && member.id !== interaction.user.id) {
+    return privateReply(interaction, 'In a private chat with the bot, leave member blank to play solo.');
   }
-  if (inviteBlocked(rounds, interaction.guildId, member.id, interaction.user.id, now)) {
+  const parent = member ?? interaction.user;
+  if (parent.bot || (!solo && parent.id === interaction.user.id)) {
+    return privateReply(interaction, 'Pick another person in this chat.');
+  }
+  const scope = scopeFor(interaction);
+  if (inviteBlocked(rounds, scope, parent.id, interaction.user.id, now)) {
     return privateReply(interaction, 'That member already has a round or you have an invite pending.');
   }
   const id = randomUUID();
   const round = {
-    stage: 'invite', starter: interaction.user.id, parent: member.id,
-    guild: interaction.guildId, channel: interaction.channelId, due: now + inviteDelay,
+    stage: solo ? 'reveal' : 'invite', starter: interaction.user.id, parent: parent.id,
+    guild: scope, context: interaction.context, channel: interaction.channelId,
+    due: now + (solo ? revealDelay : inviteDelay),
   };
   save(id, round);
   try {
-    await interaction.reply({ ...card(id, round), allowedMentions: ping(member.id) });
+    await interaction.reply({ ...card(id, round), allowedMentions: solo ? silent : ping(parent.id) });
   } catch (error) {
     save(id);
     throw error;
@@ -273,7 +302,10 @@ async function invite(interaction) {
 }
 
 async function handle(interaction) {
-  if (!interaction.guildId) return;
+  if (!interaction.guildId && !interaction.channelId) return;
+  if (interaction.guildId && !client.guilds.cache.has(interaction.guildId)) {
+    return privateReply(interaction, 'Add Pregnant Bot to this server to play here, or use it in a DM.');
+  }
   if (interaction.isChatInputCommand()) return command(interaction);
   if ((!interaction.isButton() && !interaction.isUserSelectMenu()) ||
       !interaction.customId.startsWith('baby:')) return;
@@ -281,7 +313,7 @@ async function handle(interaction) {
   const [, id, action] = interaction.customId.split(':');
   const round = rounds[id];
   if (!round) return privateReply(interaction, 'This round has ended.');
-  if (round.guild !== interaction.guildId) return privateReply(interaction, 'This round belongs to another server.');
+  if (!canUseRound(round, interaction)) return privateReply(interaction, 'This game belongs to another chat.');
   if (action.startsWith('gift_') && round.shower && gifts[action.slice(5)]) {
     if (round.gifts?.[interaction.user.id]) return privateReply(interaction, 'You already brought a gift.');
     const given = { ...round.gifts, [interaction.user.id]: gifts[action.slice(5)] };
@@ -354,8 +386,11 @@ async function handle(interaction) {
   } else if (round.stage === 'birth' && now >= round.due && action === 'loss') {
     message = 'This round ended with a miscarriage.';
   } else if (round.stage === 'birth' && now >= round.due && action === 'choose') {
+    if (round.context === InteractionContextType.PrivateChannel && interaction.channelId !== round.channel) {
+      return privateReply(interaction, 'Open the original chat and use /remind to choose a member.');
+    }
     const menu = new UserSelectMenuBuilder().setCustomId('baby:' + id + ':select')
-      .setPlaceholder('Pick a server member');
+      .setPlaceholder('Pick a member of this chat');
     return interaction.reply({
       content: 'Who would you like to invite as your kid?',
       components: [new ActionRowBuilder().addComponents(menu)],
@@ -365,7 +400,7 @@ async function handle(interaction) {
              action === 'select' && interaction.isUserSelectMenu()) {
     const child = interaction.users.get(interaction.values[0]);
     if (!child || child.bot || child.id === round.parent) {
-      return privateReply(interaction, 'Pick another server member.');
+      return privateReply(interaction, 'Pick another person in this chat.');
     }
     updated = next('child', now + inviteDelay, { child: child.id });
   } else if (round.stage === 'child' && now < round.due && action === 'join') {
@@ -405,9 +440,14 @@ async function reminders() {
         round = rounds[id];
       }
       try {
-        const channel = await client.channels.fetch(round.channel);
+        const channel = round.context === InteractionContextType.PrivateChannel
+          ? await (await client.users.fetch(round.parent)).createDM()
+          : await client.channels.fetch(round.channel);
         if (rounds[id] !== round) continue;
-        if (!channel?.isSendable() || channel.guildId !== round.guild) {
+        const correctChannel = round.context === InteractionContextType.PrivateChannel ||
+          round.context === InteractionContextType.BotDM ? channel?.id === round.channel :
+            channel?.guildId === round.guild;
+        if (!channel?.isSendable() || !correctChannel) {
           reminderRetryAt.set(id, Date.now() + 60000);
           continue;
         }
@@ -422,7 +462,9 @@ async function reminders() {
           allowedMentions: ping(round.parent),
         });
         if (rounds[id] === round) {
-          save(id, { ...current, reminded: true });
+          save(id, { ...current, reminded: true,
+            ...(round.context === InteractionContextType.PrivateChannel ? { deliveryChannel: channel.id } : {}),
+          });
           reminderRetryAt.delete(id);
         }
         else await sent.delete();
@@ -448,11 +490,17 @@ client.on(Events.InteractionCreate, interaction => {
 client.once(Events.ClientReady, async ready => {
   try {
     ready.user.setActivity('so excited for pregnancies!!', { type: ActivityType.Custom });
-    await ready.rest.put(Routes.applicationCommands(ready.application.id), {
-      body: [
+    let userInstall = false;
+    try {
+      const application = await ready.application.fetch();
+      userInstall = Object.hasOwn(application.integrationTypesConfig ?? {}, String(ApplicationIntegrationType.UserInstall));
+    } catch (error) {
+      console.warn('Could not check user-install settings; enabling bot DMs only:', error.message);
+    }
+    const definitions = [
         {
-          name: 'impregnant', description: 'Invite a member to play the baby game',
-          options: [{ type: 6, name: 'member', description: 'Who to invite', required: true }],
+          name: 'impregnant', description: 'Start a solo DM game or invite someone in a shared chat',
+          options: [{ type: 6, name: 'member', description: 'Who to invite (leave blank in bot DMs)' }],
         },
         { name: 'babyshower', description: 'Open a baby shower with silly gifts' },
         {
@@ -464,8 +512,8 @@ client.once(Events.ClientReady, async ready => {
         {
           name: 'guessbirth', description: 'Guess the baby’s birth weight in grams',
           options: [
-            { type: 6, name: 'member', description: 'Which parent’s baby', required: true },
             { type: 4, name: 'grams', description: 'Your guess in grams', required: true, min_value: 1500, max_value: 6000 },
+            { type: 6, name: 'member', description: 'Which parent’s baby (defaults to you)' },
           ],
         },
         {
@@ -475,12 +523,26 @@ client.once(Events.ClientReady, async ready => {
         { name: 'babypet', description: 'Give your baby a surprise imaginary pet' },
         { name: 'kick', description: 'Announce a dramatic baby kick' },
         { name: 'panic', description: 'Ask the server to help with a missing baby sock' },
-      ].map(command => ({
+      ];
+    const register = enabled => ready.rest.put(Routes.applicationCommands(ready.application.id), {
+      body: definitions.map(command => ({
         ...command,
-        integration_types: [ApplicationIntegrationType.GuildInstall],
-        contexts: [InteractionContextType.Guild],
+        integration_types: enabled
+          ? [ApplicationIntegrationType.GuildInstall, ApplicationIntegrationType.UserInstall]
+          : [ApplicationIntegrationType.GuildInstall],
+        contexts: enabled
+          ? [InteractionContextType.Guild, InteractionContextType.BotDM, InteractionContextType.PrivateChannel]
+          : [InteractionContextType.Guild, InteractionContextType.BotDM],
       })),
     });
+    try {
+      await register(userInstall);
+    } catch (error) {
+      if (!userInstall) throw error;
+      console.warn('Shared-DM commands could not be registered; using server and bot DMs:', error.message);
+      userInstall = false;
+      await register(false);
+    }
     if (serverId) {
       try {
         await ready.rest.put(Routes.applicationGuildCommands(ready.application.id, serverId), { body: [] });
@@ -492,6 +554,12 @@ client.once(Events.ClientReady, async ready => {
       scopes: [OAuth2Scopes.Bot, OAuth2Scopes.ApplicationsCommands],
       permissions: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages],
     }));
+    if (userInstall) {
+      console.log('Account install link for shared DMs: https://discord.com/oauth2/authorize?client_id=' +
+        ready.application.id + '&integration_type=1&scope=applications.commands');
+    } else {
+      console.log('Enable User Install in the Developer Portal to make commands available in shared DMs.');
+    }
     console.log('Ready as ' + ready.user.tag + '. Try /impregnant in your server.');
     setInterval(() => void reminders().catch(console.error), 5000);
     await reminders();
