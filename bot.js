@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import {
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Events,
+  ActionRowBuilder, ActivityType, ButtonBuilder, ButtonStyle, Client, Events,
   GatewayIntentBits, MessageFlags, Routes, UserSelectMenuBuilder,
 } from 'discord.js';
 
@@ -431,6 +431,7 @@ client.on(Events.InteractionCreate, interaction => {
 
 client.once(Events.ClientReady, async ready => {
   try {
+    ready.user.setActivity('so excited for pregnancies!!', { type: ActivityType.Custom });
     await ready.rest.put(Routes.applicationGuildCommands(ready.application.id, serverId), {
       body: [
         {
